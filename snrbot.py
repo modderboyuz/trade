@@ -2,6 +2,7 @@ import json
 import logging
 import asyncio
 import os
+import aiofiles
 from aiogram import Bot, Dispatcher
 from aiogram.enums import ParseMode
 from aiogram.types import Message, ChatJoinRequest, InlineKeyboardMarkup, InlineKeyboardButton
@@ -43,12 +44,12 @@ keyboard = InlineKeyboardMarkup(inline_keyboard=[
 ])
 
 # ✅ Foydalanuvchini faylga saqlovchi funksiya
-def save_user(user_id: int):
+async def save_user(user_id: int):
     try:
         # Fayl mavjudligini tekshirish
         if os.path.exists(USERS_FILE):
-            with open(USERS_FILE, "r", encoding="utf-8") as f:
-                content = f.read().strip()
+            async with aiofiles.open(USERS_FILE, "r", encoding="utf-8") as f:
+                content = (await f.read()).strip()
                 if content:
                     users = json.loads(content)
                 else:
@@ -62,18 +63,18 @@ def save_user(user_id: int):
     if user_id not in users:
         users.append(user_id)
         try:
-            with open(USERS_FILE, "w", encoding="utf-8") as f:
-                json.dump(users, f, indent=4, ensure_ascii=False)
+            async with aiofiles.open(USERS_FILE, "w", encoding="utf-8") as f:
+                await f.write(json.dumps(users, indent=4, ensure_ascii=False))
             logger.info(f"Yangi foydalanuvchi saqlandi: {user_id}")
         except Exception as e:
             logger.error(f"Foydalanuvchini saqlashda xatolik: {e}")
 
 # 📊 Foydalanuvchilar sonini olish
-def get_users_count():
+async def get_users_count():
     try:
         if os.path.exists(USERS_FILE):
-            with open(USERS_FILE, "r", encoding="utf-8") as f:
-                content = f.read().strip()
+            async with aiofiles.open(USERS_FILE, "r", encoding="utf-8") as f:
+                content = (await f.read()).strip()
                 if content:
                     users = json.loads(content)
                     return len(users)
@@ -86,7 +87,7 @@ def get_users_count():
 @dp.message(Command("start"))
 async def start_handler(message: Message):
     try:
-        save_user(message.from_user.id)
+        await save_user(message.from_user.id)
         user_name = message.from_user.first_name or "Foydalanuvchi"
         await message.answer(f"👋 Assalomu alaykum, {user_name}! Siz botga muvaffaqiyatli start berdingiz.")
         logger.info(f"Start komandasi: {message.from_user.id}")
@@ -100,7 +101,7 @@ async def stats_handler(message: Message):
         return
     
     try:
-        users_count = get_users_count()
+        users_count = await get_users_count()
         await message.answer(f"📊 Bot statistikasi:\n👥 Jami foydalanuvchilar: {users_count}")
     except Exception as e:
         logger.error(f"Stats komandasi xatoligi: {e}")
@@ -110,7 +111,7 @@ async def stats_handler(message: Message):
 @dp.chat_join_request()
 async def join_request_handler(request: ChatJoinRequest):
     try:
-        save_user(request.from_user.id)
+        await save_user(request.from_user.id)
         
         # 🔔 Foydalanuvchiga rasm va tugmali xabar yuborish
         await bot.send_photo(
@@ -139,8 +140,8 @@ async def send_all_handler(message: Message):
 
     try:
         if os.path.exists(USERS_FILE):
-            with open(USERS_FILE, "r", encoding="utf-8") as f:
-                content = f.read().strip()
+            async with aiofiles.open(USERS_FILE, "r", encoding="utf-8") as f:
+                content = (await f.read()).strip()
                 if content:
                     users = json.loads(content)
                 else:
