@@ -1,18 +1,23 @@
 import json
 import logging
 import asyncio
+import os
 from aiogram import Bot, Dispatcher
 from aiogram.enums import ParseMode
 from aiogram.types import Message, ChatJoinRequest, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import Command
 from aiogram.client.default import DefaultBotProperties
 
-# 🔐 Bot tokeni va admin ID
-API_TOKEN = '8181160347:AAGTFV-iVUcFS-NXkxxJ6VEZgFN7dzN-sPc'
-ADMIN_ID = 5091466097
+# 🔐 Bot tokeni va admin ID (environment variables dan olinadi)
+API_TOKEN = os.getenv('BOT_TOKEN', '8181160347:AAGTFV-iVUcFS-NXkxxJ6VEZgFN7dzN-sPc')
+ADMIN_ID = int(os.getenv('ADMIN_ID', '5091466097'))
 
 # 🔧 Logger sozlamalari
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 # 🔄 Bot sozlamalari
 bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
@@ -22,7 +27,7 @@ dp = Dispatcher()
 USERS_FILE = "users.json"
 
 # 🖼 Rasm ID va matn, tugma
-PHOTO_URL = "https://img.freepik.com/free-vector/vip-background-design_1115-629.jpg?semt=ais_hybrid&w=740"
+PHOTO_URL = "https://img.freepik.com/free-vector/vip-background-design_1115-629.jpg"
 
 WELCOME_TEXT = """
 𝗔𝘀𝘀𝗮𝗹𝗼𝗺𝘂 𝗮𝗹𝗮𝘆𝗸𝘂𝗺😊
@@ -40,28 +45,73 @@ keyboard = InlineKeyboardMarkup(inline_keyboard=[
 # ✅ Foydalanuvchini faylga saqlovchi funksiya
 def save_user(user_id: int):
     try:
-        with open(USERS_FILE, "r", encoding="utf-8") as f:
-            users = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
+        # Fayl mavjudligini tekshirish
+        if os.path.exists(USERS_FILE):
+            with open(USERS_FILE, "r", encoding="utf-8") as f:
+                content = f.read().strip()
+                if content:
+                    users = json.loads(content)
+                else:
+                    users = []
+        else:
+            users = []
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        logger.warning(f"Faylni o'qishda xatolik: {e}")
         users = []
 
     if user_id not in users:
         users.append(user_id)
-        with open(USERS_FILE, "w", encoding="utf-8") as f:
-            json.dump(users, f, indent=4)
+        try:
+            with open(USERS_FILE, "w", encoding="utf-8") as f:
+                json.dump(users, f, indent=4, ensure_ascii=False)
+            logger.info(f"Yangi foydalanuvchi saqlandi: {user_id}")
+        except Exception as e:
+            logger.error(f"Foydalanuvchini saqlashda xatolik: {e}")
+
+# 📊 Foydalanuvchilar sonini olish
+def get_users_count():
+    try:
+        if os.path.exists(USERS_FILE):
+            with open(USERS_FILE, "r", encoding="utf-8") as f:
+                content = f.read().strip()
+                if content:
+                    users = json.loads(content)
+                    return len(users)
+        return 0
+    except Exception as e:
+        logger.error(f"Foydalanuvchilar sonini olishda xatolik: {e}")
+        return 0
 
 # 👋 /start komandasi
 @dp.message(Command("start"))
 async def start_handler(message: Message):
-    save_user(message.from_user.id)
-    await message.answer("👋 Assalomu alaykum! Siz botga muvaffaqiyatli start berdingiz.")
+    try:
+        save_user(message.from_user.id)
+        user_name = message.from_user.first_name or "Foydalanuvchi"
+        await message.answer(f"👋 Assalomu alaykum, {user_name}! Siz botga muvaffaqiyatli start berdingiz.")
+        logger.info(f"Start komandasi: {message.from_user.id}")
+    except Exception as e:
+        logger.error(f"Start komandasi xatoligi: {e}")
 
-# 🔔 Guruhga kirish so‘rovi kelganda faqat xabar yuboriladi, approve yo‘q
+# 📊 /stats komandasi (faqat admin uchun)
+@dp.message(Command("stats"))
+async def stats_handler(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    try:
+        users_count = get_users_count()
+        await message.answer(f"📊 Bot statistikasi:\n👥 Jami foydalanuvchilar: {users_count}")
+    except Exception as e:
+        logger.error(f"Stats komandasi xatoligi: {e}")
+        await message.answer("❌ Statistikani olishda xatolik yuz berdi.")
+
+# 🔔 Guruhga kirish so'rovi kelganda
 @dp.chat_join_request()
 async def join_request_handler(request: ChatJoinRequest):
     try:
         save_user(request.from_user.id)
-
+        
         # 🔔 Foydalanuvchiga rasm va tugmali xabar yuborish
         await bot.send_photo(
             chat_id=request.from_user.id,
@@ -69,44 +119,102 @@ async def join_request_handler(request: ChatJoinRequest):
             caption=WELCOME_TEXT,
             reply_markup=keyboard
         )
+        logger.info(f"Join request xabari yuborildi: {request.from_user.id}")
     except Exception as e:
-        logging.warning(f"Xatolik: foydalanuvchiga xabar yuborilmadi: {request.from_user.id}")
-        logging.exception(e)
-
+        logger.warning(f"Join request xabarini yuborishda xatolik: {request.from_user.id} - {e}")
 
 # 📤 Admin uchun /sendall komanda
 @dp.message(Command("sendall"))
 async def send_all_handler(message: Message):
     if message.from_user.id != ADMIN_ID:
+        await message.answer("❌ Sizda bu komandani ishlatish huquqi yo'q!")
         return
 
     text = message.text.split(maxsplit=1)
     if len(text) < 2:
-        await message.answer("✏️ Xabar matnini yozing: /sendall Matn")
+        await message.answer("✏️ Xabar matnini yozing:\n<code>/sendall Sizning xabaringiz</code>")
         return
 
     msg = text[1]
 
     try:
-        with open(USERS_FILE, "r", encoding="utf-8") as f:
-            users = json.load(f)
-    except:
-        users = []
+        if os.path.exists(USERS_FILE):
+            with open(USERS_FILE, "r", encoding="utf-8") as f:
+                content = f.read().strip()
+                if content:
+                    users = json.loads(content)
+                else:
+                    users = []
+        else:
+            users = []
+    except Exception as e:
+        logger.error(f"Foydalanuvchilar ro'yxatini o'qishda xatolik: {e}")
+        await message.answer("❌ Foydalanuvchilar ro'yxatini o'qishda xatolik!")
+        return
+
+    if not users:
+        await message.answer("📭 Hech qanday foydalanuvchi topilmadi!")
+        return
+
+    # Yuborish jarayoni haqida xabar
+    status_msg = await message.answer(f"📤 {len(users)} ta foydalanuvchiga xabar yuborilmoqda...")
 
     success, failed = 0, 0
-    for user_id in users:
+    for i, user_id in enumerate(users):
         try:
             await bot.send_message(user_id, msg)
             success += 1
-            await asyncio.sleep(0.1)
-        except:
+            await asyncio.sleep(0.05)  # Rate limiting uchun
+            
+            # Har 50 ta xabardan keyin progress yangilanadi
+            if (i + 1) % 50 == 0:
+                await status_msg.edit_text(
+                    f"📤 Jarayon: {i + 1}/{len(users)}\n"
+                    f"✅ Yuborildi: {success}\n"
+                    f"❌ Yuborilmadi: {failed}"
+                )
+        except Exception as e:
             failed += 1
+            logger.warning(f"Xabar yuborishda xatolik {user_id}: {e}")
 
-    await message.answer(f"📤 Yuborildi: {success} ta\n❌ Yuborilmadi: {failed} ta")
+    # Yakuniy natija
+    await status_msg.edit_text(
+        f"📤 Xabar yuborish yakunlandi!\n"
+        f"✅ Muvaffaqiyatli: {success} ta\n"
+        f"❌ Muvaffaqiyatsiz: {failed} ta\n"
+        f"📊 Jami: {len(users)} ta"
+    )
+
+# 🛠 Xatoliklarni tutuvchi handler
+@dp.message()
+async def echo_handler(message: Message):
+    try:
+        # Faqat admin uchun echo
+        if message.from_user.id == ADMIN_ID:
+            await message.answer(f"Echo: {message.text}")
+    except Exception as e:
+        logger.error(f"Echo handler xatoligi: {e}")
 
 # ▶️ Botni ishga tushiramiz
 async def main():
-    await dp.start_polling(bot)
+    try:
+        logger.info("Bot ishga tushmoqda...")
+        
+        # Bot haqida ma'lumot olish
+        bot_info = await bot.get_me()
+        logger.info(f"Bot muvaffaqiyatli ishga tushdi: @{bot_info.username}")
+        
+        # Polling boshlash
+        await dp.start_polling(bot, skip_updates=True)
+    except Exception as e:
+        logger.error(f"Botni ishga tushirishda xatolik: {e}")
+    finally:
+        await bot.session.close()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Bot to'xtatildi!")
+    except Exception as e:
+        logger.error(f"Umumiy xatolik: {e}")
