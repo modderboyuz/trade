@@ -5,13 +5,21 @@ import os
 import aiofiles
 from aiogram import Bot, Dispatcher
 from aiogram.enums import ParseMode
-from aiogram.types import Message, ChatJoinRequest, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import Message, ChatJoinRequest, InlineKeyboardMarkup, InlineKeyboardButton, Update
 from aiogram.filters import Command
 from aiogram.client.default import DefaultBotProperties
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+from aiohttp import web
+from aiohttp.web_app import Application
 
 # 🔐 Bot tokeni va admin ID (environment variables dan olinadi)
 API_TOKEN = os.getenv('BOT_TOKEN', '8181160347:AAGTFV-iVUcFS-NXkxxJ6VEZgFN7dzN-sPc')
 ADMIN_ID = int(os.getenv('ADMIN_ID', '5091466097'))
+
+# 🌐 Webhook sozlamalari
+WEBHOOK_PATH = f"/webhook/{API_TOKEN}"
+WEBHOOK_SECRET = "my-secret"
+BASE_WEBHOOK_URL = os.getenv('RENDER_EXTERNAL_URL', 'https://your-app.onrender.com')
 
 # 🔧 Logger sozlamalari
 logging.basicConfig(
@@ -27,7 +35,7 @@ dp = Dispatcher()
 # 📁 Foydalanuvchilar JSON fayli
 USERS_FILE = "users.json"
 
-# 🖼 Rasm ID va matn, tugma
+# 🖼 Rasm URL va matn, tugma
 PHOTO_URL = "https://img.freepik.com/free-vector/vip-background-design_1115-629.jpg"
 
 WELCOME_TEXT = """
@@ -196,26 +204,101 @@ async def echo_handler(message: Message):
     except Exception as e:
         logger.error(f"Echo handler xatoligi: {e}")
 
-# ▶️ Botni ishga tushiramiz
-async def main():
+# 🌐 Health check endpoint
+async def health_check(request):
+    return web.Response(text="Bot is running! 🤖", status=200)
+
+# 🌐 Root endpoint
+async def root_handler(request):
+    return web.Response(
+        text="""
+        🤖 Telegram VIP Bot is running!
+        
+        Bot features:
+        ✅ User registration
+        📊 Admin statistics  
+        📤 Broadcast messages
+        🔔 Join request handling
+        
+        Status: Active ✅
+        """, 
+        status=200,
+        content_type='text/plain'
+    )
+
+# 🚀 Webhook o'rnatish
+async def on_startup():
+    webhook_url = f"{BASE_WEBHOOK_URL}{WEBHOOK_PATH}"
     try:
-        logger.info("Bot ishga tushmoqda...")
+        # Avvalgi webhook ni o'chirish
+        await bot.delete_webhook(drop_pending_updates=True)
         
-        # Bot haqida ma'lumot olish
+        # Yangi webhook o'rnatish
+        await bot.set_webhook(
+            url=webhook_url,
+            secret_token=WEBHOOK_SECRET,
+            drop_pending_updates=True
+        )
+        
+        # Bot ma'lumotlarini olish
         bot_info = await bot.get_me()
-        logger.info(f"Bot muvaffaqiyatli ishga tushdi: @{bot_info.username}")
+        logger.info(f"✅ Bot ishga tushdi: @{bot_info.username}")
+        logger.info(f"🌐 Webhook o'rnatildi: {webhook_url}")
         
-        # Polling boshlash
-        await dp.start_polling(bot, skip_updates=True)
     except Exception as e:
-        logger.error(f"Botni ishga tushirishda xatolik: {e}")
-    finally:
+        logger.error(f"❌ Webhook o'rnatishda xatolik: {e}")
+
+# 🛑 Webhook o'chirish
+async def on_shutdown():
+    try:
+        await bot.delete_webhook(drop_pending_updates=True)
         await bot.session.close()
+        logger.info("🛑 Bot to'xtatildi va webhook o'chirildi")
+    except Exception as e:
+        logger.error(f"❌ Shutdown xatoligi: {e}")
+
+# ▶️ Web server yaratish va ishga tushirish
+def create_app() -> Application:
+    app = web.Application()
+    
+    # Webhook handler
+    webhook_requests_handler = SimpleRequestHandler(
+        dispatcher=dp,
+        bot=bot,
+        secret_token=WEBHOOK_SECRET,
+    )
+    webhook_requests_handler.register(app, path=WEBHOOK_PATH)
+    
+    # HTTP endpoints
+    app.router.add_get("/", root_handler)
+    app.router.add_get("/health", health_check)
+    
+    # Startup va shutdown eventlari
+    app.on_startup.append(lambda app: asyncio.create_task(on_startup()))
+    app.on_shutdown.append(lambda app: asyncio.create_task(on_shutdown()))
+    
+    return app
+
+# 🚀 Main funksiya
+def main():
+    try:
+        app = create_app()
+        
+        # Port ni environment variable dan olish (Render avtomatik beradi)
+        port = int(os.getenv('PORT', 8080))
+        
+        logger.info(f"🚀 Server {port} portda ishga tushmoqda...")
+        
+        # Web server ishga tushirish
+        web.run_app(
+            app,
+            host='0.0.0.0',
+            port=port,
+            access_log=logger
+        )
+        
+    except Exception as e:
+        logger.error(f"❌ Server ishga tushirishda xatolik: {e}")
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("Bot to'xtatildi!")
-    except Exception as e:
-        logger.error(f"Umumiy xatolik: {e}")
+    main()
