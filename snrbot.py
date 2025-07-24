@@ -3,7 +3,7 @@ import logging
 import asyncio
 import os
 import aiofiles
-import sqlite3
+import asyncpg
 from datetime import datetime
 from aiogram import Bot, Dispatcher
 from aiogram.enums import ParseMode
@@ -13,36 +13,18 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
 from aiohttp.web_app import Application
-from dotenv import load_dotenv
-import aiosqlite
-
-# Environment variables yuklash
-load_dotenv()
 
 # 🔐 Bot tokeni va admin ID (environment variables dan olinadi)
-API_TOKEN = os.getenv('BOT_TOKEN')
-ADMIN_ID_STR = os.getenv('ADMIN_ID')
+API_TOKEN = os.getenv('BOT_TOKEN', '8181160347:AAGTFV-iVUcFS-NXkxxJ6VEZgFN7dzN-sPc')
+ADMIN_ID = int(os.getenv('ADMIN_ID', '5091466097'))
 
-if not API_TOKEN:
-    raise ValueError("BOT_TOKEN environment variable is required!")
-
-if not ADMIN_ID_STR:
-    raise ValueError("ADMIN_ID environment variable is required!")
-
-try:
-    ADMIN_ID = int(ADMIN_ID_STR)
-except ValueError:
-    raise ValueError("ADMIN_ID must be a valid integer!")
-
-# 🗄️ Database file path
-DATABASE_FILE = "users.db"
+# 🗄️ Database URL
+DATABASE_URL = os.getenv('DATABASE_URL', 'postgresql://postgres:Jonibek2307@db.oqxlfhcdxdpajvtaifmn.supabase.co:5432/postgres')
 
 # 🌐 Webhook sozlamalari
 WEBHOOK_PATH = f"/webhook/{API_TOKEN}"
 WEBHOOK_SECRET = "my-secret"
-BASE_WEBHOOK_URL = os.getenv('RENDER_EXTERNAL_URL')
-if not BASE_WEBHOOK_URL:
-    raise ValueError("RENDER_EXTERNAL_URL environment variable is required!")
+BASE_WEBHOOK_URL = os.getenv('RENDER_EXTERNAL_URL', 'https://your-app.onrender.com')
 
 # 🔧 Logger sozlamalari
 logging.basicConfig(
@@ -54,6 +36,9 @@ logger = logging.getLogger(__name__)
 # 🔄 Bot sozlamalari
 bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
+
+# 🗄️ Database connection pool
+db_pool = None
 
 # 🖼 Rasm URL va matn, tugma
 PHOTO_URL = "https://img.freepik.com/free-vector/vip-background-design_1115-629.jpg"
@@ -71,55 +56,85 @@ keyboard = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="🎁 Kursni olish", url="https://t.me/+CHczj85tbcA4YTVi")]
 ])
 
-# 🗄️ Database yaratish va sozlash
+# 🗄️ Database connection yaratish
+async def create_db_pool():
+    global db_pool
+    try:
+        db_pool = await asyncpg.create_pool(
+            DATABASE_URL,
+            min_size=1,
+            max_size=10,
+            command_timeout=60
+        )
+        logger.info("✅ Database connection pool yaratildi")
+        
+        # Database jadvalini tekshirish va yaratish
+        await init_database()
+        
+    except Exception as e:
+        logger.error(f"❌ Database connection xatoligi: {e}")
+        raise
+
+# 🗄️ Database jadvalini yaratish
 async def init_database():
     try:
-        async with aiosqlite.connect(DATABASE_FILE) as db:
+        async with db_pool.acquire() as conn:
             # Users jadvalini yaratish
-            await db.execute("""
+            await conn.execute("""
                 CREATE TABLE IF NOT EXISTS users (
-                    id INTEGER PRIMARY KEY,
+                    id BIGINT PRIMARY KEY,
                     first_name TEXT NOT NULL,
                     last_name TEXT,
                     username TEXT,
                     language_code TEXT,
-                    is_bot INTEGER DEFAULT 0,
-                    is_premium INTEGER DEFAULT 0,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    last_activity TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    is_bot BOOLEAN DEFAULT FALSE,
+                    is_premium BOOLEAN DEFAULT FALSE,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ DEFAULT NOW(),
+                    last_activity TIMESTAMPTZ DEFAULT NOW()
                 )
             """)
             
             # Indexlar yaratish
-            await db.execute("""
+            await conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_users_username 
                 ON users(username) WHERE username IS NOT NULL
             """)
             
-            await db.execute("""
+            await conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_users_created_at 
                 ON users(created_at)
             """)
             
-            await db.execute("""
+            await conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_users_last_activity 
                 ON users(last_activity)
             """)
             
-            # Trigger yaratish (updated_at ni avtomatik yangilash uchun)
-            await db.execute("""
-                CREATE TRIGGER IF NOT EXISTS update_users_updated_at
-                AFTER UPDATE ON users
-                FOR EACH ROW
+            # Trigger function yaratish
+            await conn.execute("""
+                CREATE OR REPLACE FUNCTION update_updated_at_column()
+                RETURNS TRIGGER AS $$
                 BEGIN
-                    UPDATE users SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
-                END
+                    NEW.updated_at = NOW();
+                    RETURN NEW;
+                END;
+                $$ language 'plpgsql'
             """)
             
-            await db.commit()
+            # Trigger yaratish
+            await conn.execute("""
+                DROP TRIGGER IF EXISTS update_users_updated_at ON users
+            """)
             
-        logger.info("✅ SQLite database va jadvallar yaratildi")
+            await conn.execute("""
+                CREATE TRIGGER update_users_updated_at
+                    BEFORE UPDATE ON users
+                    FOR EACH ROW
+                    EXECUTE FUNCTION update_updated_at_column()
+            """)
+            
+        logger.info("✅ Database jadval va indexlar yaratildi")
         
     except Exception as e:
         logger.error(f"❌ Database init xatoligi: {e}")
@@ -128,52 +143,51 @@ async def init_database():
 # ✅ Foydalanuvchini database ga saqlovchi funksiya
 async def save_user(user: User):
     try:
-        async with aiosqlite.connect(DATABASE_FILE) as db:
+        async with db_pool.acquire() as conn:
             # Foydalanuvchi mavjudligini tekshirish
-            cursor = await db.execute("SELECT id FROM users WHERE id = ?", (user.id,))
-            existing_user = await cursor.fetchone()
+            existing_user = await conn.fetchrow(
+                "SELECT id FROM users WHERE id = $1", user.id
+            )
             
             if existing_user:
                 # Mavjud foydalanuvchini yangilash
-                await db.execute("""
+                await conn.execute("""
                     UPDATE users SET 
-                        first_name = ?,
-                        last_name = ?,
-                        username = ?,
-                        language_code = ?,
-                        is_bot = ?,
-                        is_premium = ?,
-                        last_activity = CURRENT_TIMESTAMP
-                    WHERE id = ?
-                """, (
-                    user.first_name,
-                    user.last_name,
-                    user.username,
-                    user.language_code,
-                    1 if user.is_bot else 0,
-                    1 if user.is_premium else 0,
-                    user.id
-                ))
+                        first_name = $2,
+                        last_name = $3,
+                        username = $4,
+                        language_code = $5,
+                        is_bot = $6,
+                        is_premium = $7,
+                        last_activity = NOW()
+                    WHERE id = $1
+                """, 
+                user.id,
+                user.first_name,
+                user.last_name,
+                user.username,
+                user.language_code,
+                user.is_bot or False,
+                user.is_premium or False
+                )
                 logger.info(f"Foydalanuvchi yangilandi: {user.id}")
             else:
                 # Yangi foydalanuvchini qo'shish
-                await db.execute("""
+                await conn.execute("""
                     INSERT INTO users (
                         id, first_name, last_name, username, 
                         language_code, is_bot, is_premium
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    user.id,
-                    user.first_name,
-                    user.last_name,
-                    user.username,
-                    user.language_code,
-                    1 if user.is_bot else 0,
-                    1 if user.is_premium else 0
-                ))
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+                """,
+                user.id,
+                user.first_name,
+                user.last_name,
+                user.username,
+                user.language_code,
+                user.is_bot or False,
+                user.is_premium or False
+                )
                 logger.info(f"Yangi foydalanuvchi saqlandi: {user.id}")
-                
-            await db.commit()
                 
     except Exception as e:
         logger.error(f"Foydalanuvchini saqlashda xatolik: {e}")
@@ -181,10 +195,9 @@ async def save_user(user: User):
 # 📊 Foydalanuvchilar sonini olish
 async def get_users_count():
     try:
-        async with aiosqlite.connect(DATABASE_FILE) as db:
-            cursor = await db.execute("SELECT COUNT(*) FROM users")
-            result = await cursor.fetchone()
-            return result[0] if result else 0
+        async with db_pool.acquire() as conn:
+            result = await conn.fetchval("SELECT COUNT(*) FROM users")
+            return result or 0
     except Exception as e:
         logger.error(f"Foydalanuvchilar sonini olishda xatolik: {e}")
         return 0
@@ -192,56 +205,46 @@ async def get_users_count():
 # 📊 Batafsil statistika olish
 async def get_detailed_stats():
     try:
-        async with aiosqlite.connect(DATABASE_FILE) as db:
+        async with db_pool.acquire() as conn:
             # Umumiy statistika
-            cursor = await db.execute("SELECT COUNT(*) FROM users")
-            result = await cursor.fetchone()
-            total_users = result[0] if result else 0
+            total_users = await conn.fetchval("SELECT COUNT(*) FROM users")
             
             # Bugungi yangi foydalanuvchilar
-            cursor = await db.execute("""
+            today_users = await conn.fetchval("""
                 SELECT COUNT(*) FROM users 
-                WHERE DATE(created_at) = DATE('now')
+                WHERE DATE(created_at) = CURRENT_DATE
             """)
-            result = await cursor.fetchone()
-            today_users = result[0] if result else 0
             
             # Haftalik yangi foydalanuvchilar
-            cursor = await db.execute("""
+            week_users = await conn.fetchval("""
                 SELECT COUNT(*) FROM users 
-                WHERE created_at >= datetime('now', '-7 days')
+                WHERE created_at >= NOW() - INTERVAL '7 days'
             """)
-            result = await cursor.fetchone()
-            week_users = result[0] if result else 0
             
             # Oylik yangi foydalanuvchilar
-            cursor = await db.execute("""
+            month_users = await conn.fetchval("""
                 SELECT COUNT(*) FROM users 
-                WHERE created_at >= datetime('now', '-30 days')
+                WHERE created_at >= NOW() - INTERVAL '30 days'
             """)
-            result = await cursor.fetchone()
-            month_users = result[0] if result else 0
             
             # Premium foydalanuvchilar
-            cursor = await db.execute("SELECT COUNT(*) FROM users WHERE is_premium = 1")
-            result = await cursor.fetchone()
-            premium_users = result[0] if result else 0
+            premium_users = await conn.fetchval("""
+                SELECT COUNT(*) FROM users WHERE is_premium = TRUE
+            """)
             
             # Faol foydalanuvchilar (oxirgi 24 soatda)
-            cursor = await db.execute("""
+            active_users = await conn.fetchval("""
                 SELECT COUNT(*) FROM users 
-                WHERE last_activity >= datetime('now', '-24 hours')
+                WHERE last_activity >= NOW() - INTERVAL '24 hours'
             """)
-            result = await cursor.fetchone()
-            active_users = result[0] if result else 0
             
             return {
-                'total': total_users,
-                'today': today_users,
-                'week': week_users,
-                'month': month_users,
-                'premium': premium_users,
-                'active': active_users
+                'total': total_users or 0,
+                'today': today_users or 0,
+                'week': week_users or 0,
+                'month': month_users or 0,
+                'premium': premium_users or 0,
+                'active': active_users or 0
             }
             
     except Exception as e:
@@ -254,10 +257,9 @@ async def get_detailed_stats():
 # 📤 Barcha foydalanuvchilar ID larini olish
 async def get_all_user_ids():
     try:
-        async with aiosqlite.connect(DATABASE_FILE) as db:
-            cursor = await db.execute("SELECT id FROM users ORDER BY created_at DESC")
-            rows = await cursor.fetchall()
-            return [row[0] for row in rows]
+        async with db_pool.acquire() as conn:
+            rows = await conn.fetch("SELECT id FROM users ORDER BY created_at DESC")
+            return [row['id'] for row in rows]
     except Exception as e:
         logger.error(f"Foydalanuvchilar ID larini olishda xatolik: {e}")
         return []
@@ -267,23 +269,11 @@ async def get_all_user_ids():
 async def start_handler(message: Message):
     try:
         await save_user(message.from_user)
-        
-        # Rasm va tugmali xabar yuborish
-        await bot.send_photo(
-            chat_id=message.chat.id,
-            photo=PHOTO_URL,
-            caption=WELCOME_TEXT,
-            reply_markup=keyboard
-        )
+        user_name = message.from_user.first_name or "Foydalanuvchi"
+        await message.answer(f"👋 Assalomu alaykum, {user_name}! Siz botga muvaffaqiyatli start berdingiz.")
         logger.info(f"Start komandasi: {message.from_user.id}")
     except Exception as e:
         logger.error(f"Start komandasi xatoligi: {e}")
-        # Agar rasm yuborishda xatolik bo'lsa, oddiy matn yuborish
-        try:
-            user_name = message.from_user.first_name or "Foydalanuvchi"
-            await message.answer(f"👋 Assalomu alaykum, {user_name}!\n\n{WELCOME_TEXT}", reply_markup=keyboard)
-        except Exception as e2:
-            logger.error(f"Oddiy xabar yuborishda ham xatolik: {e2}")
 
 # 📊 /stats komandasi (faqat admin uchun)
 @dp.message(Command("stats"))
@@ -399,27 +389,20 @@ async def echo_handler(message: Message):
 
 # 🌐 Health check endpoint
 async def health_check(request):
-    db_status = "❌ Disconnected"
-    db_error = None
-    
     try:
         # Database connection tekshirish
-        async with aiosqlite.connect(DATABASE_FILE) as db:
-            cursor = await db.execute("SELECT 1")
-            await cursor.fetchone()
-        db_status = "✅ Connected"
+        async with db_pool.acquire() as conn:
+            await conn.fetchval("SELECT 1")
+        
+        return web.Response(
+            text="Bot is running! 🤖\nDatabase: Connected ✅", 
+            status=200
+        )
     except Exception as e:
-        db_status = "❌ Error"
-        db_error = str(e)
-    
-    response_text = f"Bot is running! 🤖\nDatabase: {db_status}"
-    if db_error:
-        response_text += f"\nError: {db_error}"
-    
-    return web.Response(
-        text=response_text, 
-        status=200
-    )
+        return web.Response(
+            text=f"Bot is running! 🤖\nDatabase: Error ❌\n{str(e)}", 
+            status=500
+        )
 
 # 🌐 Root endpoint
 async def root_handler(request):
@@ -431,7 +414,7 @@ async def root_handler(request):
 🤖 Telegram VIP Bot is running!
 
 Bot features:
-✅ User registration with SQLite
+✅ User registration with Supabase
 📊 Advanced statistics  
 📤 Broadcast messages
 🔔 Join request handling
@@ -445,7 +428,7 @@ Bot features:
 🟢 Active (24h): {stats['active']:,}
 
 Status: Active ✅
-Database: SQLite ✅
+Database: Connected ✅
             """, 
             status=200,
             content_type='text/plain'
@@ -467,18 +450,11 @@ Error: {str(e)}
 async def on_startup():
     webhook_url = f"{BASE_WEBHOOK_URL}{WEBHOOK_PATH}"
     try:
-        logger.info("🚀 Bot ishga tushmoqda...")
-        
-        # Database yaratish
-        await init_database()
-        
-        # Bot ma'lumotlarini olish
-        bot_info = await bot.get_me()
-        logger.info(f"✅ Bot ma'lumotlari olindi: @{bot_info.username}")
+        # Database connection yaratish
+        await create_db_pool()
         
         # Avvalgi webhook ni o'chirish
         await bot.delete_webhook(drop_pending_updates=True)
-        logger.info("🗑️ Avvalgi webhook o'chirildi")
         
         # Yangi webhook o'rnatish
         await bot.set_webhook(
@@ -486,23 +462,25 @@ async def on_startup():
             secret_token=WEBHOOK_SECRET,
             drop_pending_updates=True
         )
+        
+        # Bot ma'lumotlarini olish
+        bot_info = await bot.get_me()
+        logger.info(f"✅ Bot ishga tushdi: @{bot_info.username}")
         logger.info(f"🌐 Webhook o'rnatildi: {webhook_url}")
-        
-        # Webhook holatini tekshirish
-        webhook_info = await bot.get_webhook_info()
-        logger.info(f"📊 Webhook holati: {webhook_info.url}")
-        
-        logger.info("✅ Bot muvaffaqiyatli ishga tushdi!")
         
     except Exception as e:
         logger.error(f"❌ Startup xatoligi: {e}")
-        raise
 
 # 🛑 Webhook o'chirish
 async def on_shutdown():
     try:
         await bot.delete_webhook(drop_pending_updates=True)
         await bot.session.close()
+        
+        # Database connection yopish
+        if db_pool:
+            await db_pool.close()
+            
         logger.info("🛑 Bot to'xtatildi va webhook o'chirildi")
     except Exception as e:
         logger.error(f"❌ Shutdown xatoligi: {e}")
